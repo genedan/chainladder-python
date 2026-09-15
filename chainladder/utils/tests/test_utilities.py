@@ -897,10 +897,10 @@ def test_set_backend_dask_deprecated(clrd) -> None:
     with pytest.warns(DeprecationWarning, match="dask") as record:
         try:
             clrd.set_backend("dask", deep=True)
-        except Exception:
-            # The actual conversion can fail when the optional 'dask'
-            # dependency is not installed; we only care that the deprecation
-            # warning fired at the public entry point.
+        except AttributeError:
+            # With dask absent, chainladder.utils.dask falls back to numpy, so
+            # the conversion raises AttributeError on numpy.from_array. We only
+            # care that the deprecation warning fired at the public entry point.
             pass
     dask_warnings = [
         w
@@ -1275,3 +1275,34 @@ def test_describe_option_invalid_regex() -> None:
     """
     with pytest.raises(ValueError, match="not a valid regular expression"):
         cl.options.describe_option("[")
+
+
+def test_triangleweight_drop_valuation_all(raa: Triangle) -> None:
+    """
+    Testing error raising from dropping too many valuations
+    """
+    with pytest.raises(Exception):
+        _ = cl.TriangleWeight(
+            drop_valuation=[
+                "1981",
+                "1982",
+                "1983",
+                "1984",
+                "1985",
+                "1986",
+                "1987",
+                "1988",
+                "1989",
+                "1990",
+            ]
+        ).fit(raa)
+
+
+def test_triangleweight_full_triangle(raa: Triangle) -> None:
+    """
+    Testing new path that allows weights on full triangles
+    """
+    ult = cl.Chainladder().fit(raa)
+    tw = cl.TriangleWeight(n_periods=4).fit(raa)
+    tw_full = cl.TriangleWeight(n_periods=4).fit(ult.full_triangle_)
+    assert tw.w_.iloc[:, :, :, 0] == tw_full.w_.iloc[:, :, :, 0]
