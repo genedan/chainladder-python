@@ -3,6 +3,8 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 from __future__ import annotations
 
+import operator
+
 import numpy as np
 import pandas as pd
 
@@ -24,8 +26,8 @@ if TYPE_CHECKING:
 
 
 class TriangleDunders:
-    """Class that implements the dunder (double underscore) methods for the
-    Triangle class
+    """
+    Class that implements the dunder (double underscore) methods for the Triangle class
     """
 
     def _validate_arithmetic(self, other: Any) -> tuple:
@@ -190,6 +192,7 @@ class TriangleDunders:
                     pd.Series(other.odims, index=other.odims),
                 ),
                 axis=1,
+                sort=False,
             ).sort_index()
             o_arr0, o_arr1 = odims[0].isna().values, odims[1].isna().values
             d_arr0, d_arr1 = ddims[0].isna().values, ddims[1].isna().values
@@ -263,7 +266,12 @@ class TriangleDunders:
 
     @staticmethod
     def _get_key_union(obj, other):
-        return set(list(obj.groups.indices.keys()) + list(other.groups.indices.keys()))
+        # fmt: off
+        return set(
+            list(obj.groups.indices.keys())
+            + list(other.groups.indices.keys())
+        )
+        # fmt: on
 
     def _arithmetic_mapper(self, obj, other, f):
         """Use Dask if available, otherwise basic list comprehension"""
@@ -277,7 +285,8 @@ class TriangleDunders:
         return concat(c, 0).sort_index()
 
     def __add__(self, other):
-        """Element-wise addition.
+        """
+        Element-wise addition.
 
         Examples
         --------
@@ -313,9 +322,10 @@ class TriangleDunders:
         if isinstance(obj, TriangleGroupBy):
 
             def f(k, self, obj, other):
-                return self._slice_or_nan(obj, other, k) + self._slice_or_nan(
-                    other, obj, k
-                )
+                # fmt: off
+                return (self._slice_or_nan(obj, other, k) +
+                        self._slice_or_nan(other, obj, k))
+                # fmt: on
 
             obj = self._arithmetic_mapper(obj, other, f)
         else:
@@ -327,7 +337,8 @@ class TriangleDunders:
         return self if other == 0 else self.__add__(other)
 
     def __sub__(self, other):
-        """Element-wise subtraction.
+        """
+        Element-wise subtraction.
 
         Examples
         --------
@@ -361,9 +372,10 @@ class TriangleDunders:
         if isinstance(obj, TriangleGroupBy):
 
             def f(k, self, obj, other):
-                return self._slice_or_nan(obj, other, k) - self._slice_or_nan(
-                    other, obj, k
-                )
+                # fmt: off
+                return (self._slice_or_nan(obj, other, k) -
+                        self._slice_or_nan(other, obj, k))
+                # fmt: on
 
             obj = self._arithmetic_mapper(obj, other, f)
         else:
@@ -404,7 +416,8 @@ class TriangleDunders:
         return obj
 
     def __mul__(self, other):
-        """Element-wise multiplication.
+        """
+        Element-wise multiplication.
 
         Examples
         --------
@@ -438,9 +451,10 @@ class TriangleDunders:
         if isinstance(obj, TriangleGroupBy):
 
             def f(k, self, obj, other):
-                return self._slice_or_nan(obj, other, k) * self._slice_or_nan(
-                    other, obj, k
-                )
+                # fmt: off
+                return (self._slice_or_nan(obj, other, k) *
+                        self._slice_or_nan(other, obj, k))
+                # fmt: on
 
             obj = self._arithmetic_mapper(obj, other, f)
         else:
@@ -455,9 +469,10 @@ class TriangleDunders:
         if isinstance(obj, TriangleGroupBy):
 
             def f(k, self, obj, other):
-                return self._slice_or_nan(obj, other, k) ** self._slice_or_nan(
-                    other, obj, k
-                )
+                # fmt: off
+                return (self._slice_or_nan(obj, other, k) **
+                        self._slice_or_nan(other, obj, k))
+                # fmt: on
 
             obj = self._arithmetic_mapper(obj, other, f)
         else:
@@ -528,9 +543,10 @@ class TriangleDunders:
         if isinstance(obj, TriangleGroupBy):
 
             def f(k, self, obj, other):
-                return self._slice_or_nan(obj, other, k) / self._slice_or_nan(
-                    other, obj, k
-                )
+                # fmt: off
+                return (self._slice_or_nan(obj, other, k) /
+                        self._slice_or_nan(other, obj, k))
+                # fmt: on
 
             obj = self._arithmetic_mapper(obj, other, f)
         else:
@@ -561,14 +577,49 @@ class TriangleDunders:
     def __contains__(self, value):
         return self.__dict__.get(value, None) is not None
 
-    def __lt__(self, value):
-        obj = self.copy()
-        xp = self.get_array_module()
-        obj.values = xp.nan_to_num(obj.values) < xp.nan_to_num(value)
+    def _compare(self, value, op):
+        """
+        Compare the Triangle elementwise against a scalar, array or Triangle.
+
+        Missing values propagate, so any comparison involving one is
+        ``False``. That follows IEEE 754, and matches numpy and pandas.
+
+        Parameters
+        ----------
+        value:
+            The right-hand operand. A Triangle is reduced to its values,
+            after moving both operands onto a common array backend.
+        op: Callable
+            A binary operator from the ``operator`` module.
+
+        Returns
+        -------
+        Triangle of bool
+        """
+        left = self
+        if isinstance(value, TriangleDunders):
+            from chainladder import options
+
+            backend = options.ARRAY_PRIORITY[
+                min([
+                    options.ARRAY_PRIORITY.index(x)
+                    for x in [self.array_backend, value.array_backend]
+                ])
+            ]
+            left = self.set_backend(backend)
+            value = value.set_backend(backend).values
+        obj = left.copy()
+        obj.values = op(obj.values, value)
         return obj
 
+    def __lt__(self, value):
+        return self._compare(value, operator.lt)
+
     def __le__(self, value):
-        obj = self.copy()
-        xp = self.get_array_module()
-        obj.values = xp.nan_to_num(obj.values) < xp.nan_to_num(value)
-        return obj
+        return self._compare(value, operator.le)
+
+    def __gt__(self, value):
+        return self._compare(value, operator.gt)
+
+    def __ge__(self, value):
+        return self._compare(value, operator.ge)

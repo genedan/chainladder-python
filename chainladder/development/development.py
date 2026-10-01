@@ -33,7 +33,10 @@ class Development(DevelopmentBase):
     ----------
     n_periods: integer, optional (default = -1)
         number of origin periods to be used in the ldf average calculation. For
-        all origin periods, set n_periods = -1
+        all origin periods, set n_periods = -1.
+
+        Setting n_periods to 1 does not allow enough degrees of freedom to support
+        calculation of all regression statistics; only LDFs would be calculated.
     average: literal (or list of literals), or float, optional (default = 'volume')
         type of averaging to use for ldf average calculation.
         Options include 'volume', 'simple',  'regression', and 'geometric'. If numeric values are supplied,
@@ -356,7 +359,8 @@ class Development(DevelopmentBase):
         self.average_: np.ndarray
 
     def fit(self, X: TriangleLike, y: None = None, sample_weight: None = None):
-        """Fit the model with X.
+        """
+        Fit the model with X.
 
         Parameters
         ----------
@@ -409,10 +413,17 @@ class Development(DevelopmentBase):
             drop=self.drop,
         )
 
-        if hasattr(X, "w_v2_"):
-            self.w_v2_ = tw.fit(obj.age_to_age * X.w_v2_).w_
-        else:
-            self.w_v2_ = tw.fit(obj.age_to_age).w_
+        # w_v2_ is the in-progress migration path and computes the same drops as
+        # the w_ path below, so letting it warn would emit the same message twice
+        # for one fit. The w_ path keeps the warning.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message="Some exclusions have been ignored"
+            )
+            if hasattr(X, "w_v2_"):
+                self.w_v2_ = tw.fit(obj.age_to_age * X.w_v2_).w_
+            else:
+                self.w_v2_ = tw.fit(obj.age_to_age).w_
 
         self.w_ = self._assign_n_periods_weight(
             obj, n_periods_
@@ -426,11 +437,6 @@ class Development(DevelopmentBase):
             params.sigma_fill(self.sigma_interpolation).std_err_fill()
             w_reg = params._w_reg
         else:
-            warnings.warn(
-                "Setting n_periods=1 does not allow enough degrees "
-                "of freedom to support calculation of all regression "
-                "statistics. Only LDFs have been calculated."
-            )
             w_reg = params._w_reg
 
         params = xp.concatenate((params.slope_, params.sigma_, params.std_err_), 3)
@@ -448,7 +454,8 @@ class Development(DevelopmentBase):
         return self
 
     def transform(self, X):
-        """If X and self are of different shapes, align self to X, else
+        """
+        If X and self are of different shapes, align self to X, else
         return self.
 
         Parameters
