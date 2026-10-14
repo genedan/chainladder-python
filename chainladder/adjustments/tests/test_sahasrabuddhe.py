@@ -1,0 +1,847 @@
+import chainladder as cl
+import numpy as np
+import pytest
+
+from types import SimpleNamespace
+
+from sklearn.base import clone
+
+
+# Exhibit C1 of Sahasrabuddhe (2010), Example 1: the claim size model
+# parameters at exposure year 10's cost level.
+THETA_10 = [
+    28138,
+    84242,
+    133998,
+    182460,
+    204649,
+    228245,
+    252830,
+    265063,
+    275707,
+    280000,
+]
+
+
+def _carrier(tri):
+    """
+    A full origin x development rectangle of ones. A Trend fitted on a Triangle
+    only reaches the Triangle's own cells; fitted on this it covers every cell.
+    """
+    carrier = tri.copy().set_backend("numpy")
+    carrier.valuation_date = carrier.valuation.max()
+    return (carrier * 0 + 1).fillna(1)
+
+
+def _index(tri, **kwargs):
+    """
+    A cost level index built from a Trend, stated relative to the latest origin
+    period as the estimators take a Triangle. A Trend anchors its factors at its
+    own latest date, which is not the latest origin period of the rectangle it
+    is fitted on, so the index is divided through by that row.
+    """
+    index = 1 / cl.Trend(**kwargs).fit(_carrier(tri)).trend_
+    return index / index.iloc[..., -1:, :]
+
+
+@pytest.fixture
+def paper_trend(genins):
+    """
+    Exhibit B3: the combined exposure- and calendar-period cost level index,
+    restated relative to the latest origin period as the estimators take it.
+    """
+
+    def index(**kwargs):
+        return 1 / cl.Trend(**kwargs).fit(_carrier(genins)).trend_
+
+    paper = index(
+        trends=[0.02, 0.05, 0.02],
+        dates=[
+            ("2006-12-31", None),
+            ("2007-12-31", "2006-12-31"),
+            ("2010-12-31", "2007-12-31"),
+        ],
+        axis="origin",
+    ) * index(
+        trends=[0.01, -0.05, 0.01],
+        dates=[
+            ("2002-12-31", None),
+            ("2003-12-31", "2002-12-31"),
+            (None, "2003-12-31"),
+        ],
+        axis="valuation",
+    )
+    return paper / paper.iloc[..., -1:, :]
+
+
+@pytest.fixture
+def paper_model(genins, paper_trend):
+    return cl.Sahasrabuddhe(
+        means=dict(zip(genins.development, THETA_10)),
+        trend=paper_trend,
+        data_limit=1_000_000,
+        basic_limit=500_000,
+        target_layer=(0, 500_000),
+    ).fit(genins)
+
+
+def test_reproduces_published_exhibit_d1(paper_model):
+    """
+    Exhibit D1, the restated triangle.
+
+    One cell is excluded: the paper's exhibit A1 prints 359,840 at exposure
+    period 8 age 12, where genins -- and the Taylor-Ashe triangle it comes
+    from -- has 359,480. A transposed digit in the paper's own input, so its
+    D1 is internally consistent with it and ours is consistent with genins.
+    """
+    published = np.array(
+        [
+            [
+                452881,
+                1419731,
+                2279040,
+                2793772,
+                3377947,
+                3978376,
+                4038185,
+                4142394,
+                4349865,
+                4405265,
+            ],
+            [
+                432566,
+                1610197,
+                2766439,
+                4100116,
+                4538378,
+                4794873,
+                5260266,
+                5484617,
+                5887561,
+                None,
+            ],
+            [
+                368296,
+                1634013,
+                2745402,
+                3840401,
+                4623708,
+                4671636,
+                5090015,
+                5324759,
+                None,
+                None,
+            ],
+            [
+                382236,
+                1741436,
+                2636785,
+                4330559,
+                4539482,
+                4811270,
+                4902613,
+                None,
+                None,
+                None,
+            ],
+            [
+                529368,
+                1353815,
+                2481777,
+                3242747,
+                3722312,
+                4131335,
+                None,
+                None,
+                None,
+                None,
+            ],
+            [459320, 1541795, 2468413, 3244186, 3922258, None, None, None, None, None],
+            [481990, 1405037, 2583135, 3571425, None, None, None, None, None, None],
+            [381903, 1504277, 2968365, None, None, None, None, None, None, None],
+            [388062, 1400758, None, None, None, None, None, None, None, None],
+            [344014, None, None, None, None, None, None, None, None, None],
+        ],
+        dtype="float64",
+    )
+    comparable = ~np.isnan(published)
+    comparable[7, 0] = False  # the A1 typo, see docstring
+
+    adjusted = paper_model.triangle_.set_backend("numpy").values[0, 0]
+    assert np.abs(adjusted[comparable] - published[comparable]).max() <= 3.0
+
+
+def test_reproduces_published_exhibits_d2_and_d3(genins, paper_model):
+    """Exhibits D2 and D3 follow from ordinary Development on the restated data."""
+    dev = cl.Development(average="volume").fit(paper_model.triangle_)
+    published_ldf = [3.511, 1.714, 1.399, 1.147, 1.076, 1.057, 1.039, 1.063, 1.013]
+    published_cdf = [12.291, 3.501, 2.042, 1.460, 1.273, 1.183, 1.119, 1.077, 1.013]
+    assert np.abs(dev.ldf_.values[0, 0, 0] - published_ldf).max() <= 0.0005
+    assert np.abs(dev.cdf_.values[0, 0, 0] - published_cdf).max() <= 0.002
+
+
+def test_pipeline_matches_a_manual_fit(genins, paper_trend, paper_model):
+    """The transformer hands adjusted values downstream, not the original."""
+    pipe = cl.Pipeline([
+        (
+            "basis",
+            cl.Sahasrabuddhe(
+                means=dict(zip(genins.development, THETA_10)),
+                trend=paper_trend,
+                data_limit=1_000_000,
+                basic_limit=500_000,
+                target_layer=(0, 500_000),
+            ),
+        ),
+        ("dev", cl.Development(average="volume")),
+    ]).fit(genins)
+    manual = cl.Development(average="volume").fit(paper_model.triangle_)
+    assert np.allclose(pipe.named_steps.dev.ldf_.values, manual.ldf_.values)
+    # Guard the premise: fitting the raw triangle would give something else.
+    raw = cl.Development(average="volume").fit(genins)
+    assert not np.allclose(pipe.named_steps.dev.ldf_.values, raw.ldf_.values)
+
+
+def test_preserves_the_index_axis(clrd):
+    """
+    The adjustment is per-cell, so a Triangle with many index entries has to
+    come back with all of them. Slicing the base period with [0, 0, ...]
+    instead of [..., ] would silently return one.
+    """
+    tri = clrd["CumPaidLoss"]
+    trend = _index(tri, trends=0.04, axis="origin")
+    means = dict(zip(tri.development, np.linspace(30000, 300000, 10)))
+    model = cl.Sahasrabuddhe(
+        means=means,
+        trend=trend,
+        data_limit=1_000_000,
+        basic_limit=500_000,
+        target_layer=(0, 500_000),
+    ).fit(tri)
+    assert model.triangle_.shape == tri.shape
+    assert np.array_equal(
+        np.isnan(model.triangle_.set_backend("numpy").values),
+        np.isnan(tri.set_backend("numpy").values),
+    )
+
+
+def test_triangle_trend_is_taken_to_be_at_the_latest_origin(genins, paper_trend):
+    """
+    A Triangle is applied as given, on the understanding that its latest origin
+    row is 1.0, so the means are unchanged there and scaled by the index
+    elsewhere. Nothing rebases it: an index based elsewhere moves the means.
+    """
+    theta = np.array(THETA_10, dtype="float64")
+    means = dict(zip(genins.development, THETA_10))
+    lev = cl.LEV(means=means, trend=paper_trend).fit(genins)
+    fitted = np.asarray(lev.means_.set_backend("numpy").values)
+    index = np.asarray(paper_trend.set_backend("numpy").values)
+    assert np.allclose(index[..., -1, :], 1.0)
+    assert np.allclose(fitted[..., -1, :], theta)
+    assert np.allclose(fitted, theta * index)
+
+    doubled = cl.LEV(means=means, trend=paper_trend * 2).fit(genins)
+    assert np.allclose(
+        np.asarray(doubled.means_.set_backend("numpy").values)[..., -1, :], 2 * theta
+    )
+
+
+def test_rejects_a_trend_from_a_different_triangle(genins):
+    """Matching shapes are not enough -- the periods have to match too."""
+    other = cl.load_sample("clrd")["CumPaidLoss"]
+    trend = _index(other, trends=0.04, axis="origin")
+    assert trend.shape[-2:] == genins.shape[-2:]  # would pass a shape-only check
+    with pytest.raises(ValueError, match="does not share X's origin axis"):
+        cl.Sahasrabuddhe(
+            means=dict(zip(genins.development, THETA_10)),
+            trend=trend,
+            data_limit=1_000_000,
+            basic_limit=500_000,
+            target_layer=(0, 500_000),
+        ).fit(genins)
+
+
+def test_rejects_a_trend_with_gaps_in_the_latest_period(genins):
+    """
+    Fitted on the Triangle itself, the latest period's row is mostly empty, and
+    every cell divides by it -- which would quietly turn most of the result to
+    NaN.
+    """
+    trend = 1 / cl.Trend(0.05, axis="origin").fit(genins).trend_
+    with pytest.raises(ValueError, match="full rectangle of ones"):
+        cl.Sahasrabuddhe(
+            means=dict(zip(genins.development, THETA_10)),
+            trend=trend,
+            data_limit=1_000_000,
+            basic_limit=500_000,
+            target_layer=(0, 500_000),
+        ).fit(genins)
+
+
+@pytest.mark.parametrize(
+    "missing", ["trend", "data_limit", "basic_limit", "target_layer"]
+)
+def test_required_arguments_raise(genins, paper_trend, missing):
+    kwargs = dict(
+        means=dict(zip(genins.development, THETA_10)),
+        trend=paper_trend,
+        data_limit=1_000_000,
+        basic_limit=500_000,
+        target_layer=(0, 500_000),
+    )
+    kwargs[missing] = None
+    with pytest.raises(ValueError, match=missing):
+        cl.Sahasrabuddhe(**kwargs).fit(genins)
+
+
+def test_params_survive_sklearn_clone():
+    estimator = cl.Sahasrabuddhe(
+        means={12: 1.0},
+        data_limit=1e6,
+        basic_limit=5e5,
+        target_layer=(0, 5e5),
+    )
+    assert clone(estimator).get_params() == estimator.get_params()
+
+
+def test_lev_at_zero_is_zero(genins):
+    """
+    `0 / means_` is NaN in Triangle arithmetic and `1 - NaN` is then 1, so the
+    closed form would hand back the means untouched at a limit of zero. That
+    would silently corrupt every layer attaching at 0, which is the common case.
+    """
+    means = dict(zip(genins.development, THETA_10))
+    # A degenerate layer is rejected outright, so zero is reached as an
+    # attachment rather than as a limit.
+    with pytest.raises(ValueError, match="must exceed attachment"):
+        cl.LEV(means=means, limit=0).fit(genins)
+    assert np.allclose(
+        cl
+        .LEV(means=means, attachment=0, limit=500_000)
+        .fit(genins)
+        .lev_.set_backend("numpy")
+        .values,
+        cl.LEV(means=means, limit=500_000).fit(genins).lev_.set_backend("numpy").values,
+    )
+
+
+def _means_row(genins, year, unmask=True):
+    """THETA_10 as a one-origin Triangle labelled ``year``."""
+    base = list(genins.origin.year).index(year)
+    row = genins.iloc[0, 0, base : base + 1, :].copy()
+    if unmask:
+        row.valuation_date = row.valuation.max()
+    return (row * 0 + 1).fillna(1) * np.array(THETA_10, dtype="float64")
+
+
+@pytest.mark.parametrize("year", [2005, 2010])
+def test_one_origin_triangle_matches_a_mapping(genins, paper_trend, year):
+    """The label is immaterial: means are taken to be at the latest origin."""
+    from_triangle = cl.LEV(means=_means_row(genins, year), trend=paper_trend).fit(
+        genins
+    )
+    from_mapping = cl.LEV(
+        means=dict(zip(genins.development, THETA_10)), trend=paper_trend
+    ).fit(genins)
+    assert np.allclose(
+        from_triangle.means_.set_backend("numpy").values,
+        from_mapping.means_.set_backend("numpy").values,
+    )
+
+
+@pytest.mark.parametrize("with_trend", [True, False])
+def test_rejects_a_masked_one_origin_triangle(genins, paper_trend, with_trend):
+    """
+    A row sliced straight from the Triangle is masked past its first age, which
+    would quietly turn every later age to NaN.
+    """
+    trend = paper_trend if with_trend else None
+    with pytest.raises(ValueError, match="gaps in its single origin row"):
+        cl.LEV(means=_means_row(genins, 2010, unmask=False), trend=trend).fit(genins)
+
+
+def test_triangle_keeps_the_triangles_valuation_date(genins, paper_model):
+    """
+    The limited expected values span the whole rectangle, so the product that
+    builds `triangle_` inherits their valuation date unless it is put back.
+    Leaving it would give the result a nan_triangle and a latest diagonal
+    belonging to a Triangle running years past the data.
+    """
+    assert paper_model.triangle_.valuation_date == genins.valuation_date
+    adjusted = paper_model.triangle_.set_backend("numpy")
+    assert np.array_equal(
+        np.isnan(np.asarray(adjusted.nan_triangle, dtype="float64")),
+        np.isnan(np.asarray(genins.set_backend("numpy").nan_triangle, dtype="float64")),
+    )
+    assert (
+        np.isfinite(
+            paper_model.triangle_.latest_diagonal.set_backend("numpy").values
+        ).sum()
+        == genins.shape[-2]
+    )
+
+
+@pytest.fixture
+def paper_development(paper_model):
+    return cl.Development(average="volume").fit(paper_model.triangle_)
+
+
+@pytest.fixture
+def paper_layer(paper_trend, genins):
+    """Sahasrabuddhe configured for a layer, ready to fit a pattern."""
+
+    def make(**kwargs):
+        return cl.Sahasrabuddhe(
+            means=dict(zip(genins.development, THETA_10)),
+            trend=paper_trend,
+            data_limit=1_000_000,
+            basic_limit=500_000,
+            **kwargs,
+        )
+
+    return make
+
+
+@pytest.mark.parametrize(
+    ("name", "layer", "published"),
+    [
+        (
+            "E1",
+            {"target_layer": (0, 500_000)},
+            [12.633, 3.590, 2.193, 1.531, 1.319, 1.211, 1.133, 1.084, 1.015, 1.000],
+        ),
+        (
+            "E2",
+            {"target_layer": (500_000, 2_000_000)},
+            [None, 652.420, 32.802, 5.924, 3.380, 2.175, 1.499, 1.257, 1.057, 1.000],
+        ),
+        (
+            "E3",
+            {"target_layer": (2_000_000, np.inf)},
+            [
+                None,
+                None,
+                84538.278,
+                279.503,
+                48.056,
+                11.155,
+                3.254,
+                1.887,
+                1.183,
+                1.000,
+            ],
+        ),
+        (
+            "E4",
+            {"target_layer": (0, 1_000_000)},
+            [13.776, 3.913, 2.375, 1.629, 1.387, 1.255, 1.155, 1.096, 1.018, 1.000],
+        ),
+    ],
+)
+def test_reproduces_published_exhibits_e1_to_e4(
+    paper_layer, paper_development, name, layer, published
+):
+    """
+    Exhibits E1 to E4 -- exposure period 1's row of each. The paper prints
+    "very large" where a layer has essentially no expected loss at that age,
+    and those cells are non-finite here for the same reason, so only the cells
+    it prints a number for are compared.
+    """
+    surface = paper_layer(**layer).fit(paper_development).full_cdf_
+    computed = surface.set_backend("numpy").values[0, 0, 0]
+    published = np.array(published, dtype="float64")
+    comparable = np.isfinite(published)
+    deviation = np.abs(computed[comparable] / published[comparable] - 1).max()
+    assert deviation <= 0.01, f"{name} deviates from the paper by {deviation:.5f}"
+
+
+def test_target_equal_to_basic_returns_the_pattern_itself(
+    paper_layer, paper_development
+):
+    """
+    Restating onto the layer the pattern already sits on is the identity, on
+    the base period's row where no cost level adjustment applies either.
+    """
+    model = paper_layer(target_layer=(0, 500_000)).fit(paper_development)
+    base_row = model.full_cdf_.set_backend("numpy").values[0, 0, -1]
+    given = paper_development.cdf_.set_backend("numpy").values[0, 0, 0]
+    assert np.allclose(base_row[: len(given)], given, rtol=1e-12)
+    assert np.isclose(base_row[-1], 1.0)
+
+
+def test_full_cdf_fills_the_whole_rectangle(paper_layer, paper_development):
+    surface = (
+        paper_layer(target_layer=(0, 500_000))
+        .fit(paper_development)
+        .full_cdf_.set_backend("numpy")
+        .values
+    )
+    assert np.isnan(surface).sum() == 0
+    # Every row reaches ultimate by the last age, whatever its cost level.
+    assert np.allclose(surface[0, 0, :, -1], 1.0)
+
+
+def test_accepts_an_estimator_or_a_bare_pattern(paper_layer, paper_development):
+    """A fitted development estimator, or the cdf_ Triangle it carries."""
+    reference = (
+        paper_layer(target_layer=(0, 500_000))
+        .fit(paper_development)
+        .full_cdf_.set_backend("numpy")
+        .values
+    )
+    from_pattern = (
+        paper_layer(target_layer=(0, 500_000))
+        .fit(paper_development.cdf_)
+        .full_cdf_.set_backend("numpy")
+        .values
+    )
+    assert np.allclose(reference, from_pattern, rtol=1e-12)
+
+
+def test_a_transformed_triangle_is_claims_not_a_pattern(paper_layer, paper_model):
+    """
+    A Triangle that has been through a development step carries a cdf_ of its
+    own. It is still claims data, and dispatching on that cdf_ would restate it
+    as though it were a pattern.
+    """
+    transformed = cl.Development(average="volume").fit_transform(paper_model.triangle_)
+    assert hasattr(transformed, "cdf_") and not transformed.is_pattern
+
+    model = paper_layer(target_layer=(0, 500_000)).fit(transformed)
+    assert hasattr(model, "triangle_")
+    assert not hasattr(model, "full_cdf_")
+
+
+def test_aligns_the_pattern_by_age_not_position(paper_layer, paper_model):
+    """
+    A fitted tail makes cdf_ longer than the development axis, so zipping the
+    two by position would silently misalign every factor.
+    """
+    transformed = cl.Development(average="volume").fit_transform(paper_model.triangle_)
+    tailed = cl.TailConstant(1.05).fit(transformed)
+    assert tailed.cdf_.shape[-1] > paper_model.triangle_.shape[-1]
+
+    with_tail = (
+        paper_layer(target_layer=(0, 500_000))
+        .fit(tailed)
+        .full_cdf_.set_backend("numpy")
+        .values
+    )
+    without = (
+        paper_layer(target_layer=(0, 500_000))
+        .fit(cl.Development(average="volume").fit(paper_model.triangle_))
+        .full_cdf_.set_backend("numpy")
+        .values
+    )
+    # The tail scales every factor by 1.05; ages beyond the triangle are dropped.
+    assert np.allclose(with_tail / without, 1.05, rtol=1e-9)
+
+
+def test_cdf_is_the_latest_diagonal_of_full_cdf(paper_layer, paper_development):
+    """
+    The pattern is the diagonal of the surface -- one cell per row, each
+    exposure period at its own current age and cost level. Reading a single row
+    instead would apply one period's cost level to all of them.
+    """
+    model = paper_layer(target_layer=(0, 500_000)).fit(paper_development)
+    surface = model.full_cdf_.set_backend("numpy").values[0, 0]
+    origins = surface.shape[0]
+    diagonal = np.array([surface[origins - 1 - j, j] for j in range(origins)])
+    assert np.allclose(
+        model.cdf_.set_backend("numpy").values[0, 0, 0][:origins],
+        diagonal,
+        rtol=1e-12,
+    )
+
+
+def test_cdf_and_ldf_labels(paper_layer, paper_development):
+    model = paper_layer(target_layer=(0, 500_000)).fit(paper_development)
+    assert list(model.cdf_.development)[:3] == ["12-Ult", "24-Ult", "36-Ult"]
+    assert list(model.ldf_.development)[:3] == ["12-24", "24-36", "36-48"]
+
+
+def test_ldf_and_cdf_are_consistent(paper_layer, paper_development):
+    """Chaining the age-to-age factors from the right rebuilds the cumulative ones."""
+    model = paper_layer(target_layer=(0, 500_000)).fit(paper_development)
+    ldf = model.ldf_.set_backend("numpy").values[0, 0, 0]
+    rebuilt = np.cumprod(ldf[::-1])[::-1]
+    assert np.allclose(
+        rebuilt, model.cdf_.set_backend("numpy").values[0, 0, 0], rtol=1e-12
+    )
+
+
+def test_a_wider_layer_develops_faster(paper_layer, paper_development):
+    """A wider layer truncates less, so it develops faster at every age."""
+    basic = (
+        paper_layer(target_layer=(0, 500_000))
+        .fit(paper_development)
+        .cdf_.set_backend("numpy")
+        .values[0, 0, 0]
+    )
+    wider = (
+        paper_layer(target_layer=(0, np.inf))
+        .fit(paper_development)
+        .cdf_.set_backend("numpy")
+        .values[0, 0, 0]
+    )
+    assert (wider[:-1] > basic[:-1]).all()
+
+
+def test_degenerate_layer_raises(paper_layer, paper_development):
+    with pytest.raises(ValueError, match="exhaustion must be the larger"):
+        paper_layer(target_layer=(500_000, 500_000)).fit(paper_development)
+
+
+def test_triangle_rejects_a_target_other_than_basic(paper_layer, genins):
+    """
+    Restating claims is a move onto the basis. Naming another layer would be a
+    silently different calculation, so it is refused rather than ignored.
+    """
+    with pytest.raises(ValueError, match="target layer must be"):
+        paper_layer(target_layer=(0, 2_000_000)).fit(genins)
+
+
+def test_incomplete_diagonal_warns_but_keeps_the_rectangle(qtr):
+    """
+    Quarterly development on annual origins means the latest diagonal touches
+    only every fourth age, so no usable pattern comes out. The surface is
+    defined for every cell regardless, so it is kept and a warning is raised.
+    """
+    tri = qtr["paid"]
+    trend = _index(tri, trends=0.03, axis="origin")
+    means = dict(zip(tri.development, np.linspace(20000, 200000, tri.shape[-1])))
+    kwargs = dict(
+        means=means,
+        trend=trend,
+        data_limit=1_000_000,
+        basic_limit=500_000,
+    )
+    restated = cl.Sahasrabuddhe(**kwargs, target_layer=(0, 500_000)).fit(tri).triangle_
+    development = cl.Development(average="volume").fit(restated)
+
+    with pytest.warns(UserWarning, match="has reached development age"):
+        model = cl.Sahasrabuddhe(**kwargs, target_layer=(0, 500_000)).fit(development)
+    assert not hasattr(model, "cdf_")
+    assert model.full_cdf_.shape == trend.shape
+
+
+def test_full_ldf_rebuilds_full_cdf(paper_layer, paper_development):
+    """
+    Age-to-age over the rectangle is the ratio of neighbouring cumulative
+    factors, so chaining a row from the right rebuilds that row.
+    """
+    model = paper_layer(target_layer=(0, 500_000)).fit(paper_development)
+    cdf = model.full_cdf_.set_backend("numpy").values[0, 0]
+    ldf = model.full_ldf_.set_backend("numpy").values[0, 0]
+
+    assert np.allclose(np.cumprod(ldf[:, ::-1], axis=1)[:, ::-1], cdf, rtol=1e-12)
+    assert np.allclose(ldf[:, -1], 1.0)
+    assert model.full_ldf_.shape == model.full_cdf_.shape
+
+
+def test_full_ldf_diagonal_is_not_ldf(paper_layer, paper_development):
+    """
+    A row of full_ldf_ divides within itself, so it is one exposure period's
+    own pattern at one cost level. ldf_ divides along the diagonal of
+    full_cdf_, which steps up a row with every age -- so consecutive factors
+    come from different exposure periods. The two are close but not equal, and
+    conflating them would silently mix cost levels.
+    """
+    model = paper_layer(target_layer=(0, 500_000)).fit(paper_development)
+    ldf = model.full_ldf_.set_backend("numpy").values[0, 0]
+    origins = ldf.shape[0]
+    diagonal = np.array([ldf[origins - 1 - j, j] for j in range(origins)])
+    pattern = model.ldf_.set_backend("numpy").values[0, 0, 0]
+
+    assert not np.allclose(diagonal, pattern)
+    assert np.allclose(diagonal, pattern, atol=0.05)  # close, as expected
+
+
+def test_full_cdf_keeps_ages_so_valuation_still_works(paper_layer, paper_development):
+    """
+    The rectangle keeps the Triangle's own development ages rather than pattern
+    labels. Relabelling it "12-24" and so on would break valuation arithmetic
+    on an object that is still an origin x development grid.
+    """
+    model = paper_layer(target_layer=(0, 500_000)).fit(paper_development)
+    assert list(model.full_cdf_.development) == list(model.full_ldf_.development)
+    assert model.full_cdf_.valuation is not None
+
+
+def test_means_are_required(genins):
+    with pytest.raises(ValueError, match="means is required"):
+        cl.LEV().fit(genins)
+
+
+def test_rejects_a_mapping_missing_an_age(genins):
+    means = dict(zip(genins.development, THETA_10))
+    del means[60]
+    with pytest.raises(ValueError, match=r"missing development age\(s\) \[60\]"):
+        cl.LEV(means=means).fit(genins)
+
+
+def test_rejects_a_negative_limit(genins, paper_trend):
+    with pytest.raises(ValueError, match="limit must be non-negative"):
+        cl.Sahasrabuddhe(
+            means=dict(zip(genins.development, THETA_10)),
+            trend=paper_trend,
+            data_limit=-1,
+            basic_limit=500_000,
+            target_layer=(0, 500_000),
+        ).fit(genins)
+
+
+def test_lev_transform_carries_the_fitted_state(genins):
+    lev = cl.LEV(means=dict(zip(genins.development, THETA_10)), limit=500_000).fit(
+        genins
+    )
+    transformed = lev.transform(genins)
+    assert transformed.means_ is lev.means_
+    assert transformed.lev_ is lev.lev_
+    assert np.array_equal(
+        np.nan_to_num(transformed.set_backend("numpy").values),
+        np.nan_to_num(genins.set_backend("numpy").values),
+    )
+
+
+@pytest.mark.parametrize("target_layer", [500_000, ("a", "b"), (0, 1, 2)])
+def test_rejects_a_malformed_target_layer(genins, paper_trend, target_layer):
+    with pytest.raises(ValueError, match="target_layer must be a pair of limits"):
+        cl.Sahasrabuddhe(
+            means=dict(zip(genins.development, THETA_10)),
+            trend=paper_trend,
+            data_limit=1_000_000,
+            basic_limit=500_000,
+            target_layer=target_layer,
+        ).fit(genins)
+
+
+def test_transform_after_a_pattern_fit_carries_the_pattern(
+    genins, paper_layer, paper_development
+):
+    """
+    Fitted to a pattern there is nothing to restate, so transform passes X
+    through and hands the restated pattern downstream instead.
+    """
+    model = paper_layer(target_layer=(0, 500_000)).fit(paper_development)
+    transformed = model.transform(genins)
+    for item in ("means_", "ldf_", "full_cdf_", "full_ldf_"):
+        assert getattr(transformed, item) is getattr(model, item)
+    assert np.allclose(
+        transformed.cdf_.set_backend("numpy").values,
+        model.cdf_.set_backend("numpy").values,
+        rtol=1e-12,
+    )
+    assert np.array_equal(
+        np.nan_to_num(transformed.set_backend("numpy").values),
+        np.nan_to_num(genins.set_backend("numpy").values),
+    )
+
+
+def test_rejects_something_that_is_not_a_pattern(paper_layer):
+    """An object whose cdf_ is not a Triangle of factors fails on use."""
+    impostor = SimpleNamespace(cdf_=np.ones(10))
+    with pytest.raises(ValueError, match="must be a fitted development estimator"):
+        paper_layer(target_layer=(0, 500_000)).fit(impostor)
+
+
+def test_lev_takes_an_unfitted_trend(genins):
+    """An unfitted Trend is fitted on X and inverted into a cost level index."""
+    means = dict(zip(genins.development, THETA_10))
+    index = _index(genins, trends=0.04, axis="origin")
+    from_triangle = cl.LEV(means=means, trend=index).fit(genins)
+    from_trend = cl.LEV(means=means, trend=cl.Trend(0.04, axis="origin")).fit(genins)
+    assert np.allclose(
+        from_trend.means_.set_backend("numpy").values,
+        from_triangle.means_.set_backend("numpy").values,
+    )
+    assert np.allclose(
+        from_trend.trend_.set_backend("numpy").values,
+        index.set_backend("numpy").values,
+    )
+
+
+def test_trend_object_is_left_unfitted(genins):
+    """fit works on a copy: the caller's Trend is neither fitted nor changed."""
+    trend = cl.Trend(0.04, axis="origin")
+    cl.LEV(means=dict(zip(genins.development, THETA_10)), trend=trend).fit(genins)
+    assert not hasattr(trend, "trend_")
+    assert trend.get_params() == cl.Trend(0.04, axis="origin").get_params()
+
+
+def test_trend_is_none_without_a_trend(genins):
+    lev = cl.LEV(means=dict(zip(genins.development, THETA_10))).fit(genins)
+    assert lev.trend_ is None
+
+
+def test_sahasrabuddhe_takes_an_unfitted_trend(genins):
+    kwargs = dict(
+        means=dict(zip(genins.development, THETA_10)),
+        data_limit=1_000_000,
+        basic_limit=500_000,
+        target_layer=(0, 500_000),
+    )
+    index = _index(genins, trends=0.04, axis="origin")
+    from_triangle = cl.Sahasrabuddhe(trend=index, **kwargs).fit(genins)
+    from_trend = cl.Sahasrabuddhe(trend=cl.Trend(0.04, axis="origin"), **kwargs).fit(
+        genins
+    )
+    assert np.allclose(
+        np.nan_to_num(from_trend.triangle_.set_backend("numpy").values),
+        np.nan_to_num(from_triangle.triangle_.set_backend("numpy").values),
+    )
+    # transform re-uses the fitted claim size model, with no trend to refit.
+    assert np.allclose(
+        np.nan_to_num(from_trend.transform(genins).set_backend("numpy").values),
+        np.nan_to_num(from_triangle.transform(genins).set_backend("numpy").values),
+    )
+
+
+def test_pattern_rejects_an_unfitted_trend(genins, paper_development):
+    """A pattern has one origin row, so there is no Triangle to fit a Trend on."""
+    with pytest.raises(ValueError, match="no Triangle to fit trend on"):
+        cl.Sahasrabuddhe(
+            means=dict(zip(genins.development, THETA_10)),
+            trend=cl.Trend(0.04, axis="origin"),
+            basic_limit=500_000,
+            target_layer=(0, 250_000),
+        ).fit(paper_development)
+
+
+def test_params_survive_sklearn_clone_with_a_trend_object():
+    estimator = cl.Sahasrabuddhe(
+        means={12: 1.0},
+        trend=cl.Trend(0.04, axis="origin"),
+        data_limit=1e6,
+        basic_limit=5e5,
+        target_layer=(0, 5e5),
+    )
+    cloned = clone(estimator)
+    assert cloned.trend is not estimator.trend
+    assert cloned.trend.get_params() == estimator.trend.get_params()
+
+
+def test_unfitted_trend_is_rebased_to_the_latest_origin(genins):
+    """
+    A valuation trend is not constant across the latest origin's row, so the
+    index a Trend object yields is divided through by that row to match the
+    convention a Triangle is taken in.
+    """
+    means = dict(zip(genins.development, THETA_10))
+    trend = cl.Trend(0.01, axis="valuation")
+    index = 1 / trend.fit(_carrier(genins)).trend_
+    assert not np.allclose(
+        np.asarray(index.set_backend("numpy").values)[..., -1, :], 1.0
+    )
+    from_trend = cl.LEV(means=means, trend=trend).fit(genins)
+    from_triangle = cl.LEV(means=means, trend=index / index.iloc[..., -1:, :]).fit(
+        genins
+    )
+    assert np.allclose(
+        np.asarray(from_trend.means_.set_backend("numpy").values),
+        np.asarray(from_triangle.means_.set_backend("numpy").values),
+    )
+    assert np.allclose(
+        np.asarray(from_trend.means_.set_backend("numpy").values)[..., -1, :],
+        np.array(THETA_10, dtype="float64"),
+    )
