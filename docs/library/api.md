@@ -57,6 +57,8 @@ Classes
   IncrementalAdditive
   ClarkLDF
   CaseOutstanding
+  ImpliedCaseDevelopment
+  ImpliedCase
   TweedieGLM
   DevelopmentML
   BarnettZehnwirth
@@ -131,6 +133,8 @@ Classes
  BerquistSherman
  Trend
  ParallelogramOLF
+ LEV
+ Sahasrabuddhe
 
 .. _workflow_ref:
 

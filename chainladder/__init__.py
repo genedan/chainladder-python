@@ -68,6 +68,8 @@ from chainladder.development import (  # noqa (API import)
     DevelopmentConstant,
     ClarkLDF,
     CaseOutstanding,
+    ImpliedCaseDevelopment,
+    ImpliedCase,
     DevelopmentML,
     TweedieGLM,
     BarnettZehnwirth,
@@ -78,6 +80,8 @@ from chainladder.adjustments import (  # noqa (API import)
     ParallelogramOLF,
     Trend,
     DisposalRate,
+    LEV,
+    Sahasrabuddhe,
 )
 from chainladder.tails import (  # noqa (API import)
     TailBase,

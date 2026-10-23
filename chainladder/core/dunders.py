@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import Any
+    from chainladder import Triangle
 
 
 class TriangleDunders:
@@ -301,11 +302,11 @@ class TriangleDunders:
             tri = cl.Triangle(
                 data={
                     'origin': [1985, 1985, 1986],
-                    'development': [1985, 1986, 1986],
+                    'valuation': [1985, 1986, 1986],
                     'paid': [100, 150, 80],
                 },
                 origin='origin',
-                development='development',
+                valuation='valuation',
                 columns=['paid'],
                 cumulative=True,
             )
@@ -351,11 +352,11 @@ class TriangleDunders:
             tri = cl.Triangle(
                 data={
                     'origin': [1985, 1985, 1986],
-                    'development': [1985, 1986, 1986],
+                    'valuation': [1985, 1986, 1986],
                     'paid': [100, 150, 80],
                 },
                 origin='origin',
-                development='development',
+                valuation='valuation',
                 columns=['paid'],
                 cumulative=True,
             )
@@ -415,7 +416,7 @@ class TriangleDunders:
         obj.values = abs(obj.values)
         return obj
 
-    def __mul__(self, other):
+    def __mul__(self, other: Any) -> Triangle:
         """
         Element-wise multiplication.
 
@@ -430,11 +431,11 @@ class TriangleDunders:
             tri = cl.Triangle(
                 data={
                     'origin': [1985, 1985, 1986],
-                    'development': [1985, 1986, 1986],
+                    'valuation': [1985, 1986, 1986],
                     'paid': [100, 150, 80],
                 },
                 origin='origin',
-                development='development',
+                valuation='valuation',
                 columns=['paid'],
                 cumulative=True,
             )
@@ -461,7 +462,7 @@ class TriangleDunders:
             obj.values = obj.values * other
         return obj
 
-    def __rmul__(self, other):
+    def __rmul__(self, other: Any) -> Triangle:
         return self if other == 1 else self.__mul__(other)
 
     def __pow__(self, other):
@@ -510,12 +511,12 @@ class TriangleDunders:
             tri = cl.Triangle(
                 data={
                     'origin': [1985, 1985, 1986],
-                    'development': [1985, 1986, 1986],
+                    'valuation': [1985, 1986, 1986],
                     'paid': [100, 150, 80],
                     'incurred': [120, 160, 100],
                 },
                 origin='origin',
-                development='development',
+                valuation='valuation',
                 columns=['paid', 'incurred'],
                 cumulative=True,
             )

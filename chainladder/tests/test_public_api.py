@@ -49,6 +49,8 @@ EXPECTED_PUBLIC_API = {
     "DevelopmentConstant",
     "ClarkLDF",
     "CaseOutstanding",
+    "ImpliedCaseDevelopment",
+    "ImpliedCase",
     "DevelopmentML",
     "TweedieGLM",
     "BarnettZehnwirth",
@@ -58,6 +60,8 @@ EXPECTED_PUBLIC_API = {
     "ParallelogramOLF",
     "Trend",
     "DisposalRate",
+    "LEV",
+    "Sahasrabuddhe",
     # tails
     "TailBase",
     "TailConstant",
